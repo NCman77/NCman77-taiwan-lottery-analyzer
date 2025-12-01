@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>台彩全自動分析儀</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .ball { width: 40px; height: 40px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; margin: 2px; font-weight: bold; }
+        .loader { border: 3px solid #f3f3f3; border-top: 3px solid #3498db; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="p-4 max-w-6xl mx-auto">
+    <h1 class="text-3xl font-bold mb-6 text-center">🎯 台彩全自動分析儀</h1>
+    
+    <!-- 狀態顯示 -->
+    <div class="bg-blue-50 p-4 rounded-lg mb-6">
+        <h2 class="text-xl font-semibold mb-2">系統狀態</h2>
+        <div id="status" class="flex items-center gap-2">
+            <div class="loader"></div>
+            <span>正在載入最新資料...</span>
+        </div>
+        <div id="last-update" class="text-sm text-gray-600 mt-2"></div>
+    </div>
+
+    <!-- 遊戲選擇 -->
+    <div class="mb-6">
+        <label class="block text-lg font-medium mb-2">選擇遊戲：</label>
+        <select id="game-select" class="border p-2 rounded w-full md:w-64">
+            <option value="">請選擇遊戲</option>
+        </select>
+    </div>
+
+    <!-- 資料顯示區域 -->
+    <div id="data-area" class="hidden">
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="font-bold text-gray-500 text-sm">📅 最新開獎</h3>
+                <div id="latest-draw" class="mt-2"></div>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="font-bold text-gray-500 text-sm">🔥 本月熱門</h3>
+                <div id="month-hot" class="mt-2"></div>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="font-bold text-gray-500 text-sm">📊 年度統計</h3>
+                <div id="year-stats" class="mt-2 text-sm"></div>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <h3 class="font-bold text-gray-500 text-sm">⚡ 系統資訊</h3>
+                <div id="sys-info" class="mt-2 text-sm"></div>
+            </div>
+        </div>
+
+        <!-- 歷史資料表格 -->
+        <div class="bg-white rounded-lg shadow overflow-hidden">
+            <div class="px-4 py-3 bg-gray-50 border-b">
+                <h3 class="font-bold">歷史開獎紀錄</h3>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead class="bg-gray-100">
+                        <tr>
+                            <th class="p-3 text-left">期號/日期</th>
+                            <th class="p-3 text-left">開獎號碼</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-table"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 錯誤訊息 -->
+    <div id="error-message" class="hidden bg-red-50 border border-red-200 p-4 rounded-lg mt-4">
+        <p class="text-red-700" id="error-text"></p>
+        <button onclick="location.reload()" class="mt-2 px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700">
+            重新載入
+        </button>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
