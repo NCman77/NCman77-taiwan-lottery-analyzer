@@ -6,7 +6,8 @@ on:
     - cron: '30 14 * * *'
   workflow_dispatch:  # 允許手動觸發
   push:
-    branches: [ main ]
+    branches:
+      - main
 
 jobs:
   update-lottery-data:
