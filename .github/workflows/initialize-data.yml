@@ -1,38 +1,65 @@
-name: 初始化歷史資料庫
-
+name: Initialize Lottery Data
 on:
-  workflow_dispatch:  # 僅手動觸發
-
-permissions:
-  contents: write
+  workflow_dispatch:  # 手動觸發
+  push:
+    paths:
+      - 'zip_files/**'  # 當zip_files目錄有變更時自動觸發
 
 jobs:
-  initialize-historical-data:
+  initialize-data:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 需要寫入權限來提交更改
     
     steps:
-    - name: 檢出倉庫
+    - name: Checkout repository
       uses: actions/checkout@v4
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
-        
-    - name: 設定 Python
-      uses: actions/setup-python@v4
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
-        
-    - name: 安裝依賴
-      run: pip install requests pytz
-      
-    - name: 執行初始化腳本
-      run: python scripts/initialize.py
-      
-    - name: 提交初始資料
+        python-version: '3.11'
+    
+    - name: Install dependencies
       run: |
-        git config --global user.name "GitHub Actions Bot"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        python -m pip install --upgrade pip
+        pip install requests pytz
+    
+    - name: Run initialization script
+      run: |
+        echo "開始初始化歷史資料..."
+        cd scripts
+        python initialize.py
+        echo "初始化完成！"
+    
+    - name: Check for changes
+      id: check_changes
+      run: |
+        echo "檢查檔案變更..."
         git add data/
-        git commit -m "初始化歷史資料：2025年1月-11月"
-        git push
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        if git diff --staged --quiet; then
+          echo "沒有變更"
+          echo "has_changes=false" >> $GITHUB_OUTPUT
+        else
+          echo "檢測到變更"
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Commit and push changes
+      if: steps.check_changes.outputs.has_changes == 'true'
+      run: |
+        echo "提交變更到倉庫..."
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "GitHub Actions"
+        git commit -m "🧹 初始化開獎歷史資料 [$(date +'%Y-%m-%d %H:%M:%S')]"
+        git push origin HEAD:${{ github.ref_name }}
+    
+    - name: Upload data as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: lottery-data-initial
+        path: data/
+        retention-days: 7
