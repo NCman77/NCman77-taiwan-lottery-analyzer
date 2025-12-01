@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 台灣彩券開獎資料初始化腳本 - ZIP檔案版本
-版本: 2.0
+版本: 2.1
 功能: 從台灣彩券官方ZIP檔案匯入歷史資料
 """
 
 import os
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from scripts.common import (
+from common import (
     log, load_existing_data, merge_and_deduplicate, 
     save_data, check_data_coverage, GAME_API_CONFIG,
     ROCN_YEAR_MAP
@@ -260,7 +260,7 @@ def parse_taiwan_lottery_csv(csv_path: str, default_year: Optional[int] = None) 
                                             if 0 <= num <= 9:
                                                 numbers.append(num)
                                         except:
-                                            pass
+                                        pass
                             
                             # 檢查號碼數量
                             expected_count = GAME_API_CONFIG.get(game_name, {}).get("number_count", 0)
