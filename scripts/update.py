@@ -61,74 +61,140 @@ def log_error(message):
 def get_download_url():
     """
     從下載頁面獲取最新年度ZIP檔的下載連結。
-    這是關鍵步驟，必須成功。
+    精確解析台灣彩券下載頁面
     """
     log_info("正在訪問台灣彩券下載頁面...")
+    
     try:
-        headers = {'User-Agent': USER_AGENT}
-        # 增加請求重試和超時設定
-        for attempt in range(3):
-            try:
-                response = requests.get(DOWNLOAD_PAGE_URL, headers=headers, timeout=15)
-                response.raise_for_status()
-                break
-            except requests.exceptions.Timeout:
-                if attempt == 2:
-                    raise
-                log_warning(f"請求超時，第 {attempt+1} 次重試...")
-                time.sleep(2)
+        headers = {
+            'User-Agent': USER_AGENT,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Referer': 'https://www.taiwanlottery.com/'
+        }
         
-        soup = BeautifulSoup(response.content, 'html.parser')
+        # 訪問下載頁面
+        response = requests.get(DOWNLOAD_PAGE_URL, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        # 檢測編碼
+        if response.encoding.lower() != 'utf-8':
+            response.encoding = 'utf-8'
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
         log_info("下載頁面解析成功")
         
-        # 方法1: 尋找包含當前民國年度的連結
+        # 方法1：直接搜索包含"114年度"的連結
         current_year_roc = datetime.now(TAIPEI_TZ).year - 1911
         target_year_text = f"{current_year_roc}年度"
         
         log_info(f"尋找目標年度連結: '{target_year_text}'")
-        download_link = None
         
-        # 搜尋所有連結元素
+        # 查找所有連結元素
         all_links = soup.find_all('a', href=True)
+        log_info(f"頁面上共有 {len(all_links)} 個連結")
+        
+        # 優先尋找精確匹配的連結
+        target_link = None
+        
+        # 方案1：精確匹配文字
         for link in all_links:
             link_text = link.get_text(strip=True)
-            href = link['href']
-            
-            # 優先匹配目標年度文字
             if target_year_text in link_text:
-                download_link = href
-                log_info(f"找到目標年度連結: {link_text}")
+                target_link = link['href']
+                log_success(f"找到精確匹配連結: {link_text}")
                 break
-            
-            # 其次匹配包含'下載'或'ZIP'的連結
-            if not download_link and ('下載' in link_text or 'ZIP' in link_text.upper()):
-                download_link = href
-                log_info(f"找到備用下載連結: {link_text}")
         
-        if not download_link and all_links:
-            # 最後嘗試第一個有效的連結
-            first_link = all_links[0]['href']
-            if first_link and first_link != '#':
-                download_link = first_link
-                log_warning(f"使用第一個找到的連結: {first_link}")
+        # 方案2：模糊匹配（包含"年度"）
+        if not target_link:
+            for link in all_links:
+                link_text = link.get_text(strip=True)
+                if '年度' in link_text and str(current_year_roc) in link_text:
+                    target_link = link['href']
+                    log_success(f"找到模糊匹配連結: {link_text}")
+                    break
         
-        if download_link:
+        # 方案3：查找包含下載或ZIP的連結
+        if not target_link:
+            for link in all_links:
+                link_text = link.get_text(strip=True).lower()
+                href = link['href'].lower()
+                if '下載' in link_text or 'download' in link_text or '.zip' in href:
+                    target_link = link['href']
+                    log_success(f"找到下載類型連結: {link_text}")
+                    break
+        
+        if not target_link and len(all_links) > 0:
+            # 方案4：查找最長的連結（通常動態連結較長）
+            longest_link = max(all_links, key=lambda x: len(x['href']))
+            target_link = longest_link['href']
+            log_warning(f"使用最長的連結: {target_link[:50]}...")
+        
+        if target_link:
             # 構建完整URL
-            if download_link.startswith('http'):
-                final_url = download_link
-            elif download_link.startswith('/'):
-                final_url = f"{BASE_URL}{download_link}"
+            if target_link.startswith('http'):
+                final_url = target_link
+            elif target_link.startswith('/'):
+                final_url = f"{BASE_URL}{target_link}"
             else:
-                final_url = f"{BASE_URL}/{download_link}"
+                final_url = f"{BASE_URL}/{target_link}"
             
-            log_success(f"獲得下載連結: {final_url}")
+            log_success(f"最終下載連結: {final_url}")
+            
+            # 驗證連結是否有效（快速檢查）
+            try:
+                test_response = requests.head(final_url, headers=headers, timeout=10)
+                if test_response.status_code == 200:
+                    content_type = test_response.headers.get('content-type', '').lower()
+                    if 'zip' in content_type or 'octet-stream' in content_type:
+                        log_success("連結驗證成功，是有效的ZIP檔案")
+                    else:
+                        log_warning(f"連結內容類型: {content_type}")
+                else:
+                    log_warning(f"連結HTTP狀態碼: {test_response.status_code}")
+            except Exception as e:
+                log_warning(f"連結驗證失敗: {str(e)}")
+            
             return final_url
         else:
-            log_error("無法在頁面上找到下載連結")
+            log_error(f"在頁面上找不到目標連結")
+            
+            # 保存頁面內容以便除錯
+            try:
+                # 保存完整的HTML
+                with open('page_content.html', 'w', encoding='utf-8') as f:
+                    f.write(response.text)
+                log_info("已保存頁面內容到 page_content.html")
+                
+                # 保存所有連結
+                with open('all_links.txt', 'w', encoding='utf-8') as f:
+                    for i, link in enumerate(all_links, 1):
+                        href = link.get('href', '')
+                        text = link.get_text(strip=True)
+                        f.write(f"{i:3d}. 文字: '{text}'\n")
+                        f.write(f"     連結: {href}\n")
+                        f.write(f"     完整標籤: {link}\n")
+                        f.write("-" * 80 + "\n")
+                log_info("已保存所有連結到 all_links.txt")
+            except Exception as e:
+                log_error(f"保存除錯檔案失敗: {str(e)}")
+            
             return None
             
+    except requests.exceptions.Timeout:
+        log_error("訪問頁面超時")
+        return None
+    except requests.exceptions.RequestException as e:
+        log_error(f"網絡請求失敗: {str(e)}")
+        return None
     except Exception as e:
-        log_error(f"獲取下載連結失敗: {str(e)}")
+        log_error(f"解析頁面時發生錯誤: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def download_zip_file(url):
@@ -466,3 +532,4 @@ def main():
 if __name__ == "__main__":
     success = main()
     exit(0 if success else 1)
+
