@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-台灣彩券開獎資料自動更新系統 - 手動+API混合版
-版本: 1.0
+台灣彩券開獎資料自動更新系統 - ZIP檔案自動解析版
+版本: 2.0
 功能: 
-1. 支援手動匯入歷史資料(2025年1月-9月)
-2. 使用API抓取最新資料(9月23日以後)
-3. 自動增量更新未來開獎資料
+1. 自動解析官網下載的ZIP檔案（110年-114年）
+2. 整合所有歷史開獎資料
+3. 使用API抓取最新資料
+4. 自動增量更新未來開獎資料
 """
 
 import requests
@@ -14,9 +15,11 @@ import os
 import sys
 import time
 import csv
+import zipfile
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Set
 import pytz
+from pathlib import Path
 
 # ========== 配置區域 ==========
 TAIPEI_TZ = pytz.timezone('Asia/Taipei')
@@ -38,6 +41,11 @@ GAME_API_CONFIG = {
         "api_path": "/DailyCashResult",
         "number_count": 5,
         "has_special": False
+    },
+    "3星彩": {
+        "api_path": None,  # 暫時沒有API
+        "number_count": 3,
+        "has_special": False
     }
 }
 
@@ -50,11 +58,21 @@ REQUEST_HEADERS = {
     'Referer': 'https://www.taiwanlottery.com/',
 }
 
+# 民國年轉西元年對照表（110年-114年）
+ROCN_YEAR_MAP = {
+    110: 2021,
+    111: 2022,
+    112: 2023,
+    113: 2024,
+    114: 2025,
+    115: 2026
+}
+
 # ========== 工具函數 ==========
 def log(message: str, level: str = "INFO"):
     """統一日誌輸出函數"""
     timestamp = datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')
-    icons = {"INFO": "ℹ️", "SUCCESS": "✅", "WARNING": "⚠️", "ERROR": "❌", "IMPORT": "📥"}
+    icons = {"INFO": "ℹ️", "SUCCESS": "✅", "WARNING": "⚠️", "ERROR": "❌", "IMPORT": "📥", "ZIP": "📦"}
     icon = icons.get(level, "ℹ️")
     print(f"[{timestamp}] {icon} {message}")
 
@@ -81,357 +99,451 @@ def safe_api_request(url: str, params: Dict, max_retries: int = 3) -> Optional[D
     log(f"API請求最終失敗: {url}", "ERROR")
     return None
 
-# ========== 資料轉換函數 ==========
-def convert_csv_to_json_format(csv_file_path: str, game_type: str) -> List[Dict]:
-    """
-    將CSV格式的歷史資料轉換為標準JSON格式
-    支援多種可能的CSV格式
-    """
-    standard_data = []
+# ========== ZIP檔案處理函數 ==========
+def extract_zip_file(zip_path: str, extract_to: str) -> List[str]:
+    """解壓縮ZIP檔案，返回解壓縮的檔案列表"""
+    extracted_files = []
     
     try:
-        with open(csv_file_path, 'r', encoding='utf-8-sig') as f:
-            # 嘗試檢測CSV分隔符號
-            sample = f.read(1024)
-            f.seek(0)
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            # 列出所有檔案
+            file_list = zip_ref.namelist()
             
-            if ',' in sample:
-                delimiter = ','
-            elif ';' in sample:
-                delimiter = ';'
-            elif '\t' in sample:
-                delimiter = '\t'
-            else:
-                delimiter = ','
+            # 過濾出CSV檔案
+            csv_files = [f for f in file_list if f.lower().endswith('.csv')]
             
-            # 讀取CSV
-            reader = csv.DictReader(f, delimiter=delimiter)
-            rows = list(reader)
-            
-            if not rows:
-                log(f"CSV檔案為空: {csv_file_path}", "WARNING")
+            if not csv_files:
+                log(f"ZIP檔案中沒有CSV檔案: {zip_path}", "WARNING")
                 return []
             
-            log(f"CSV欄位: {reader.fieldnames}", "INFO")
-            
-            # 根據不同CSV格式處理
-            for row in rows:
+            # 解壓縮所有CSV檔案
+            for csv_file in csv_files:
                 try:
-                    # 嘗試解析日期 (支援多種日期格式)
-                    date_str = None
-                    if "開獎日期" in row and row["開獎日期"]:
-                        date_str = row["開獎日期"].strip()
-                    elif "日期" in row and row["日期"]:
-                        date_str = row["日期"].strip()
-                    elif "date" in row and row["date"]:
-                        date_str = row["date"].strip()
-                    
-                    if not date_str:
-                        continue
-                    
-                    # 轉換日期格式為 YYYY-MM-DD
-                    date_formats = [
-                        "%Y/%m/%d", "%Y-%m-%d", "%Y年%m月%d日",
-                        "%m/%d/%Y", "%d/%m/%Y"
-                    ]
-                    
-                    parsed_date = None
-                    for fmt in date_formats:
-                        try:
-                            parsed_date = datetime.strptime(date_str, fmt)
-                            break
-                        except ValueError:
-                            continue
-                    
-                    if not parsed_date:
-                        log(f"無法解析日期: {date_str}", "WARNING")
-                        continue
-                    
-                    formatted_date = parsed_date.strftime("%Y-%m-%d")
-                    
-                    # 檢查是否為2025年的資料
-                    if parsed_date.year != 2025:
-                        log(f"忽略非2025年資料: {formatted_date}", "INFO")
-                        continue
-                    
-                    # 解析期號
-                    period = ""
-                    if "期別" in row and row["期別"]:
-                        period = row["期別"].strip()
-                    elif "期號" in row and row["期號"]:
-                        period = row["期號"].strip()
-                    elif "period" in row and row["period"]:
-                        period = row["period"].strip()
-                    elif "期數" in row and row["期數"]:
-                        period = row["期數"].strip()
-                    
-                    # 解析號碼
-                    numbers = []
-                    special = None
-                    
-                    if game_type == "大樂透":
-                        # 大樂透: 6個普通號 + 1個特別號
-                        for i in range(1, 7):
-                            col_name = f"號碼{i}" if f"號碼{i}" in row else f"num{i}"
-                            if col_name in row and row[col_name]:
-                                try:
-                                    num = int(float(row[col_name]))
-                                    if 1 <= num <= 49:
-                                        numbers.append(num)
-                                except:
-                                    pass
-                        
-                        # 特別號
-                        special_cols = ["特別號", "特別", "special", "特別獎"]
-                        for col in special_cols:
-                            if col in row and row[col]:
-                                try:
-                                    special = int(float(row[col]))
-                                    break
-                                except:
-                                    pass
-                    
-                    elif game_type == "威力彩":
-                        # 威力彩: 6個普通號 + 1個特別號
-                        for i in range(1, 7):
-                            col_name = f"號碼{i}" if f"號碼{i}" in row else f"num{i}"
-                            if col_name in row and row[col_name]:
-                                try:
-                                    num = int(float(row[col_name]))
-                                    if 1 <= num <= 38:
-                                        numbers.append(num)
-                                except:
-                                    pass
-                        
-                        # 特別號
-                        special_cols = ["特別號", "特別", "special", "第二區"]
-                        for col in special_cols:
-                            if col in row and row[col]:
-                                try:
-                                    special = int(float(row[col]))
-                                    break
-                                except:
-                                    pass
-                    
-                    elif game_type == "今彩539":
-                        # 今彩539: 5個普通號，無特別號
-                        for i in range(1, 6):
-                            col_name = f"號碼{i}" if f"號碼{i}" in row else f"num{i}"
-                            if col_name in row and row[col_name]:
-                                try:
-                                    num = int(float(row[col_name]))
-                                    if 1 <= num <= 39:
-                                        numbers.append(num)
-                                except:
-                                    pass
-                    
-                    # 確保號碼數量正確
-                    expected_count = GAME_API_CONFIG[game_type]["number_count"]
-                    if len(numbers) != expected_count:
-                        log(f"號碼數量不正確 {len(numbers)}/{expected_count}: {formatted_date}", "WARNING")
-                        continue
-                    
-                    # 排序號碼
-                    numbers.sort()
-                    
-                    # 建立標準格式
-                    draw_data = {
-                        "date": formatted_date,
-                        "period": period,
-                        "numbers": numbers
-                    }
-                    
-                    if special is not None:
-                        draw_data["special"] = special
-                    
-                    standard_data.append(draw_data)
-                    
+                    zip_ref.extract(csv_file, extract_to)
+                    extracted_path = os.path.join(extract_to, csv_file)
+                    extracted_files.append(extracted_path)
+                    log(f"解壓縮檔案: {csv_file}", "INFO")
                 except Exception as e:
-                    log(f"解析CSV行時發生錯誤: {e}", "WARNING")
-                    continue
+                    log(f"解壓縮失敗 {csv_file}: {e}", "WARNING")
             
-            if standard_data:
-                # 按日期排序 (從舊到新)
-                standard_data.sort(key=lambda x: x['date'])
-                log(f"成功轉換 {len(standard_data)} 筆 {game_type} 資料", "SUCCESS")
+            log(f"成功解壓縮 {len(extracted_files)} 個CSV檔案", "SUCCESS")
+            return extracted_files
             
-            return standard_data
-            
+    except zipfile.BadZipFile:
+        log(f"ZIP檔案損壞: {zip_path}", "ERROR")
     except Exception as e:
-        log(f"讀取CSV檔案失敗: {e}", "ERROR")
-        return []
+        log(f"處理ZIP檔案失敗: {e}", "ERROR")
+    
+    return []
 
-def manual_import_historical_data():
-    """
-    手動匯入歷史資料功能
-    讓使用者選擇匯入方式
-    """
-    print("=" * 60)
-    print("📥 手動匯入歷史資料工具")
-    print("=" * 60)
-    
-    data_dir = "historical_data"
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
-        log(f"建立歷史資料目錄: {data_dir}", "INFO")
-        print(f"請將您的歷史資料檔案放入 '{data_dir}' 目錄中")
-        print("支援格式: CSV, JSON")
-        print("檔案命名建議:")
-        print("  - 大樂透: lotto649_2025.csv")
-        print("  - 威力彩: superlotto_2025.csv")  
-        print("  - 今彩539: dailycash_2025.csv")
-        return False
-    
-    # 檢查目錄中的檔案
-    files = os.listdir(data_dir)
-    if not files:
-        log(f"'{data_dir}' 目錄中沒有檔案", "WARNING")
-        print(f"請將您的歷史資料檔案放入 '{data_dir}' 目錄中")
-        return False
-    
-    print(f"找到 {len(files)} 個檔案:")
-    for i, file in enumerate(files, 1):
-        print(f"  {i}. {file}")
-    
-    # 詢問使用者要處理哪些遊戲
-    print("\n請選擇要匯入的遊戲 (可多選，用逗號分隔):")
-    print("1. 大樂透")
-    print("2. 威力彩")
-    print("3. 今彩539")
-    print("4. 全部遊戲")
-    print("0. 跳過手動匯入")
+def find_zip_files(directory: str) -> List[str]:
+    """在指定目錄中尋找所有ZIP檔案"""
+    zip_files = []
     
     try:
-        choice = input("請輸入選擇: ").strip()
-        if choice == "0":
-            return True  # 使用者選擇跳過
-        
-        games_to_import = []
-        if choice == "4":
-            games_to_import = ["大樂透", "威力彩", "今彩539"]
-        else:
-            choices = [c.strip() for c in choice.split(",")]
-            for c in choices:
-                if c == "1":
-                    games_to_import.append("大樂透")
-                elif c == "2":
-                    games_to_import.append("威力彩")
-                elif c == "3":
-                    games_to_import.append("今彩539")
-        
-        if not games_to_import:
-            log("未選擇任何遊戲", "WARNING")
-            return True
-        
-        # 載入現有資料庫（如果存在）
-        existing_data = load_existing_data()
-        
-        # 處理每個遊戲
-        for game_name in games_to_import:
-            log(f"處理 {game_name} 歷史資料...", "IMPORT")
-            
-            # 尋找對應的檔案
-            matching_files = []
-            for file in files:
-                file_lower = file.lower()
-                if game_name == "大樂透" and ("lotto" in file_lower or "649" in file_lower or "大樂透" in file):
-                    matching_files.append(file)
-                elif game_name == "威力彩" and ("super" in file_lower or "威力" in file_lower or "638" in file_lower):
-                    matching_files.append(file)
-                elif game_name == "今彩539" and ("daily" in file_lower or "今彩" in file_lower or "539" in file_lower):
-                    matching_files.append(file)
-            
-            if not matching_files:
-                log(f"找不到 {game_name} 的歷史資料檔案", "WARNING")
-                continue
-            
-            # 如果有多個檔案，讓使用者選擇
-            selected_file = None
-            if len(matching_files) == 1:
-                selected_file = matching_files[0]
-                log(f"使用檔案: {selected_file}", "INFO")
-            else:
-                print(f"\n找到多個 {game_name} 檔案:")
-                for i, file in enumerate(matching_files, 1):
-                    print(f"  {i}. {file}")
-                file_choice = input("請選擇檔案 (輸入編號): ").strip()
-                try:
-                    idx = int(file_choice) - 1
-                    if 0 <= idx < len(matching_files):
-                        selected_file = matching_files[idx]
-                    else:
-                        log("無效的選擇", "WARNING")
-                        continue
-                except:
-                    log("無效的輸入", "WARNING")
-                    continue
-            
-            # 處理檔案
-            file_path = os.path.join(data_dir, selected_file)
-            if selected_file.lower().endswith('.csv'):
-                # CSV格式
-                historical_data = convert_csv_to_json_format(file_path, game_name)
-            elif selected_file.lower().endswith('.json'):
-                # JSON格式
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        historical_data = json.load(f)
-                    log(f"從JSON載入 {len(historical_data)} 筆資料", "INFO")
-                except Exception as e:
-                    log(f"讀取JSON檔案失敗: {e}", "ERROR")
-                    continue
-            else:
-                log(f"不支援的檔案格式: {selected_file}", "ERROR")
-                continue
-            
-            if historical_data:
-                # 過濾出9月23日之前的資料
-                manual_data = []
-                for draw in historical_data:
-                    try:
-                        draw_date = datetime.strptime(draw['date'], '%Y-%m-%d')
-                        # 只保留9月23日之前的資料（API從9月23日開始）
-                        if draw_date < datetime(2025, 9, 23):
-                            manual_data.append(draw)
-                    except:
-                        continue
-                
-                if manual_data:
-                    # 合併到現有資料
-                    if game_name not in existing_data:
-                        existing_data[game_name] = []
-                    
-                    # 建立現有期號集合
-                    existing_periods = set(draw.get('period', '') for draw in existing_data[game_name])
-                    
-                    # 加入新資料
-                    added_count = 0
-                    for draw in manual_data:
-                        if draw.get('period', '') not in existing_periods:
-                            existing_data[game_name].append(draw)
-                            existing_periods.add(draw.get('period', ''))
-                            added_count += 1
-                    
-                    if added_count > 0:
-                        # 按日期排序
-                        existing_data[game_name].sort(key=lambda x: x['date'])
-                        log(f"成功匯入 {added_count} 筆 {game_name} 歷史資料 (9月23日前)", "SUCCESS")
-                    else:
-                        log(f"{game_name} 無新資料可匯入", "INFO")
-                else:
-                    log(f"{game_name} 沒有9月23日前的歷史資料", "INFO")
-        
-        # 儲存合併後的資料
-        if existing_data:
-            save_data(existing_data)
-            return True
-        else:
-            log("沒有成功匯入任何資料", "WARNING")
-            return False
-            
+        for file in os.listdir(directory):
+            if file.lower().endswith('.zip'):
+                zip_path = os.path.join(directory, file)
+                zip_files.append(zip_path)
     except Exception as e:
-        log(f"手動匯入過程中發生錯誤: {e}", "ERROR")
+        log(f"掃描目錄失敗: {e}", "ERROR")
+    
+    return sorted(zip_files)  # 按名稱排序
+
+def detect_year_from_zip_filename(filename: str) -> Optional[int]:
+    """從ZIP檔案名稱檢測年份"""
+    # 移除副檔名和路徑
+    basename = os.path.basename(filename).replace('.zip', '').replace('.ZIP', '')
+    
+    # 嘗試解析數字
+    try:
+        # 嘗試直接轉整數
+        year = int(basename)
+        
+        # 檢查是否為西元年
+        if 2000 <= year <= 2100:
+            return year
+        
+        # 檢查是否為民國年（需要轉換）
+        if 100 <= year <= 200:  # 民國100年-200年
+            roc_year = year
+            if roc_year in ROCN_YEAR_MAP:
+                return ROCN_YEAR_MAP[roc_year]
+            
+            # 如果不在對照表中，使用公式計算
+            return roc_year + 1911
+            
+    except ValueError:
+        # 嘗試從字串中提取數字
+        import re
+        numbers = re.findall(r'\d+', basename)
+        if numbers:
+            try:
+                year = int(numbers[0])
+                if len(numbers[0]) == 4:  # 4位數，假設是西元年
+                    if 2000 <= year <= 2100:
+                        return year
+                elif len(numbers[0]) == 3:  # 3位數，假設是民國年
+                    roc_year = year
+                    if roc_year in ROCN_YEAR_MAP:
+                        return ROCN_YEAR_MAP[roc_year]
+                    return roc_year + 1911
+            except:
+                pass
+    
+    log(f"無法從檔案名稱檢測年份: {filename}", "WARNING")
+    return None
+
+# ========== CSV檔案處理函數 ==========
+def parse_taiwan_lottery_csv(csv_path: str, default_year: Optional[int] = None) -> List[Dict]:
+    """
+    解析台灣彩券官方CSV格式
+    格式: 遊戲名稱,期別,開獎日期,銷售總額,銷售注數,總獎金,獎號1,獎號2,獎號3,獎號4,獎號5,獎號6,特別號
+    """
+    draws = []
+    
+    try:
+        # 嘗試不同編碼
+        encodings = ['utf-8', 'utf-8-sig', 'big5', 'cp950']
+        
+        for encoding in encodings:
+            try:
+                with open(csv_path, 'r', encoding=encoding) as f:
+                    # 讀取CSV
+                    reader = csv.reader(f)
+                    rows = list(reader)
+                    
+                    if not rows:
+                        log(f"CSV檔案為空: {csv_path}", "WARNING")
+                        return []
+                    
+                    # 檢查檔案格式
+                    if len(rows[0]) < 10:
+                        log(f"CSV格式不符合預期: {csv_path}", "WARNING")
+                        return []
+                    
+                    # 處理每一行（跳過可能的標頭）
+                    start_row = 0
+                    if "遊戲名稱" in rows[0][0] or "期別" in rows[0][1]:
+                        start_row = 1  # 跳過標頭行
+                    
+                    for i in range(start_row, len(rows)):
+                        try:
+                            row = rows[i]
+                            if len(row) < 7:  # 至少要有遊戲名稱、期別、日期和幾個號碼
+                                continue
+                            
+                            # 解析遊戲名稱
+                            game_name = row[0].strip()
+                            
+                            # 只處理我們支援的遊戲
+                            if game_name not in ["大樂透", "威力彩", "今彩539", "3星彩"]:
+                                continue
+                            
+                            # 解析期別
+                            period = row[1].strip()
+                            
+                            # 解析開獎日期
+                            date_str = row[2].strip()
+                            
+                            # 日期格式處理
+                            try:
+                                # 嘗試解析日期
+                                date_formats = [
+                                    "%Y/%m/%d", "%Y-%m-%d", 
+                                    "%Y年%m月%d日", "%Y.%m.%d",
+                                    "%m/%d/%Y", "%d/%m/%Y"
+                                ]
+                                
+                                parsed_date = None
+                                for fmt in date_formats:
+                                    try:
+                                        parsed_date = datetime.strptime(date_str, fmt)
+                                        break
+                                    except ValueError:
+                                        continue
+                                
+                                if not parsed_date and default_year:
+                                    # 如果無法解析日期，使用預設年份
+                                    try:
+                                        # 嘗試解析月日
+                                        month_day = date_str.replace('月', '/').replace('日', '')
+                                        parsed_date = datetime.strptime(f"{default_year}/{month_day}", "%Y/%m/%d")
+                                    except:
+                                        pass
+                                
+                                if not parsed_date:
+                                    log(f"無法解析日期: {date_str}，跳過此筆", "WARNING")
+                                    continue
+                                
+                                formatted_date = parsed_date.strftime("%Y-%m-%d")
+                                
+                            except Exception as e:
+                                log(f"日期解析失敗 {date_str}: {e}", "WARNING")
+                                continue
+                            
+                            # 解析開獎號碼
+                            numbers = []
+                            special = None
+                            
+                            if game_name == "大樂透":
+                                # 大樂透: 6個普通號 + 1個特別號
+                                for col_idx in range(6, 12):  # 獎號1-6
+                                    if col_idx < len(row) and row[col_idx].strip():
+                                        try:
+                                            num = int(row[col_idx].strip())
+                                            if 1 <= num <= 49:
+                                                numbers.append(num)
+                                        except:
+                                            pass
+                                
+                                # 特別號
+                                if len(row) > 12 and row[12].strip():
+                                    try:
+                                        special = int(row[12].strip())
+                                    except:
+                                        pass
+                            
+                            elif game_name == "威力彩":
+                                # 威力彩: 6個普通號 + 1個特別號
+                                for col_idx in range(6, 12):  # 獎號1-6
+                                    if col_idx < len(row) and row[col_idx].strip():
+                                        try:
+                                            num = int(row[col_idx].strip())
+                                            if 1 <= num <= 38:
+                                                numbers.append(num)
+                                        except:
+                                            pass
+                                
+                                # 特別號
+                                if len(row) > 12 and row[12].strip():
+                                    try:
+                                        special = int(row[12].strip())
+                                    except:
+                                        pass
+                            
+                            elif game_name == "今彩539":
+                                # 今彩539: 5個普通號，無特別號
+                                for col_idx in range(6, 11):  # 獎號1-5
+                                    if col_idx < len(row) and row[col_idx].strip():
+                                        try:
+                                            num = int(row[col_idx].strip())
+                                            if 1 <= num <= 39:
+                                                numbers.append(num)
+                                        except:
+                                            pass
+                            
+                            elif game_name == "3星彩":
+                                # 3星彩: 3個普通號
+                                for col_idx in range(6, 9):  # 獎號1-3
+                                    if col_idx < len(row) and row[col_idx].strip():
+                                        try:
+                                            num = int(row[col_idx].strip())
+                                            if 0 <= num <= 9:
+                                                numbers.append(num)
+                                        except:
+                                            pass
+                            
+                            # 檢查號碼數量
+                            expected_count = GAME_API_CONFIG.get(game_name, {}).get("number_count", 0)
+                            if expected_count > 0 and len(numbers) != expected_count:
+                                log(f"{game_name} 號碼數量不正確 {len(numbers)}/{expected_count}: {formatted_date}", "WARNING")
+                                continue
+                            
+                            # 排序號碼（除了3星彩，因為3星彩是有順序的）
+                            if game_name != "3星彩":
+                                numbers.sort()
+                            
+                            # 建立標準格式
+                            draw_data = {
+                                "date": formatted_date,
+                                "period": period,
+                                "numbers": numbers
+                            }
+                            
+                            if special is not None:
+                                draw_data["special"] = special
+                            
+                            draws.append(draw_data)
+                            
+                        except Exception as e:
+                            log(f"解析第{i+1}行失敗: {e}", "WARNING")
+                            continue
+                    
+                    # 成功讀取，跳出編碼迴圈
+                    break
+                    
+            except UnicodeDecodeError:
+                continue  # 嘗試下一個編碼
+            except Exception as e:
+                log(f"讀取CSV失敗 {csv_path}: {e}", "ERROR")
+                return []
+        
+        if draws:
+            # 按日期排序（從舊到新）
+            draws.sort(key=lambda x: x['date'])
+            log(f"成功解析 {len(draws)} 筆開獎資料: {csv_path}", "SUCCESS")
+        
+        return draws
+        
+    except Exception as e:
+        log(f"處理CSV檔案失敗 {csv_path}: {e}", "ERROR")
+        return []
+
+# ========== 批次處理ZIP檔案函數 ==========
+def batch_process_zip_files(zip_dir: str = "zip_files") -> Dict:
+    """
+    批次處理ZIP檔案目錄中的所有ZIP檔案
+    返回整合後的資料庫
+    """
+    log(f"開始批次處理ZIP檔案目錄: {zip_dir}", "ZIP")
+    
+    # 建立暫存目錄
+    temp_dir = "temp_extract"
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # 最終資料庫
+    all_data = {game: [] for game in GAME_API_CONFIG.keys()}
+    
+    # 尋找所有ZIP檔案
+    zip_files = find_zip_files(zip_dir)
+    
+    if not zip_files:
+        log(f"在 '{zip_dir}' 目錄中找不到ZIP檔案", "WARNING")
+        log(f"請將台灣彩券官方下載的ZIP檔案放入 '{zip_dir}' 目錄中", "INFO")
+        log(f"ZIP檔案命名建議: 2021.zip, 2022.zip, ..., 2025.zip", "INFO")
+        return all_data
+    
+    log(f"找到 {len(zip_files)} 個ZIP檔案", "INFO")
+    
+    # 處理每個ZIP檔案
+    for zip_path in zip_files:
+        zip_filename = os.path.basename(zip_path)
+        log(f"處理ZIP檔案: {zip_filename}", "ZIP")
+        
+        # 從檔案名稱檢測年份
+        default_year = detect_year_from_zip_filename(zip_filename)
+        if default_year:
+            log(f"檢測到年份: {default_year}", "INFO")
+        
+        # 解壓縮ZIP檔案
+        extracted_files = extract_zip_file(zip_path, temp_dir)
+        
+        if not extracted_files:
+            log(f"ZIP檔案解壓縮失敗或沒有CSV檔案: {zip_filename}", "WARNING")
+            continue
+        
+        # 處理每個CSV檔案
+        for csv_path in extracted_files:
+            csv_filename = os.path.basename(csv_path)
+            
+            # 解析CSV檔案
+            draws = parse_taiwan_lottery_csv(csv_path, default_year)
+            
+            if draws:
+                # 將資料按遊戲分類
+                for draw in draws:
+                    # 從draw中取得遊戲名稱（CSV解析時已經包含）
+                    # 注意：parse_taiwan_lottery_csv返回的draw中不包含game_name
+                    # 我們需要從CSV檔案名稱判斷
+                    game_name = None
+                    
+                    # 從CSV檔案名稱判斷遊戲類型
+                    csv_lower = csv_filename.lower()
+                    if "大樂透" in csv_lower or "lotto" in csv_lower or "649" in csv_lower:
+                        game_name = "大樂透"
+                    elif "威力彩" in csv_lower or "super" in csv_lower or "638" in csv_lower:
+                        game_name = "威力彩"
+                    elif "今彩539" in csv_lower or "daily" in csv_lower or "539" in csv_lower:
+                        game_name = "今彩539"
+                    elif "3星彩" in csv_lower or "3星" in csv_lower:
+                        game_name = "3星彩"
+                    
+                    if game_name and game_name in all_data:
+                        all_data[game_name].append(draw)
+                    else:
+                        log(f"無法識別遊戲類型或遊戲未支援: {csv_filename}", "WARNING")
+            
+            # 刪除暫存CSV檔案
+            try:
+                os.remove(csv_path)
+            except:
+                pass
+        
+        log(f"完成處理 {zip_filename}", "SUCCESS")
+    
+    # 清理暫存目錄
+    try:
+        os.rmdir(temp_dir)
+    except:
+        pass
+    
+    # 對每個遊戲的資料進行去重和排序
+    for game_name, draws in all_data.items():
+        if draws:
+            # 去重（基於期別）
+            unique_draws = {}
+            for draw in draws:
+                period = draw.get("period", "")
+                if period:
+                    unique_draws[period] = draw
+            
+            # 轉回列表並按日期排序
+            all_data[game_name] = list(unique_draws.values())
+            all_data[game_name].sort(key=lambda x: x['date'])
+            
+            log(f"{game_name}: {len(all_data[game_name])} 筆唯一資料", "SUCCESS")
+    
+    total_records = sum(len(draws) for draws in all_data.values())
+    log(f"批次處理完成！總共 {total_records} 筆開獎資料", "SUCCESS")
+    
+    return all_data
+
+def manual_import_from_zip():
+    """手動從ZIP檔案匯入歷史資料"""
+    print("=" * 60)
+    print("📦 ZIP檔案歷史資料批次匯入工具")
+    print("=" * 60)
+    
+    zip_dir = "zip_files"
+    
+    # 檢查zip_files目錄是否存在
+    if not os.path.exists(zip_dir):
+        os.makedirs(zip_dir)
+        log(f"建立ZIP檔案目錄: {zip_dir}", "INFO")
+        print(f"請將台灣彩券官方下載的ZIP檔案放入 '{zip_dir}' 目錄中")
+        print(f"ZIP檔案命名建議: 2021.zip, 2022.zip, ..., 2025.zip")
+        print(f"然後重新執行此功能")
         return False
+    
+    # 批次處理所有ZIP檔案
+    imported_data = batch_process_zip_files(zip_dir)
+    
+    if not any(len(draws) > 0 for draws in imported_data.values()):
+        log("沒有成功匯入任何資料", "WARNING")
+        return False
+    
+    # 載入現有資料庫
+    existing_data = load_existing_data()
+    
+    # 合併資料
+    merged_data, total_added = merge_and_deduplicate(existing_data, imported_data)
+    
+    if total_added > 0:
+        # 儲存資料
+        if save_data(merged_data):
+            log(f"✅ 成功匯入 {total_added} 筆歷史資料", "SUCCESS")
+            
+            # 顯示統計資訊
+            check_data_coverage(merged_data)
+            
+            return True
+        else:
+            log("❌ 資料儲存失敗", "ERROR")
+            return False
+    else:
+        log("ℹ️ 沒有新資料可匯入（可能已存在）", "INFO")
+        return True
 
 # ========== API資料處理函數 ==========
 def parse_draw_numbers(raw_data: Dict, game_config: Dict) -> Optional[Dict]:
@@ -485,6 +597,12 @@ def fetch_game_month_data(game_name: str, year: int, month: int) -> List[Dict]:
         return []
     
     config = GAME_API_CONFIG[game_name]
+    
+    # 檢查是否有API端點
+    if not config.get("api_path"):
+        log(f"遊戲 '{game_name}' 沒有API端點", "INFO")
+        return []
+    
     api_url = f"{API_BASE_URL}{config['api_path']}"
     
     params = {
@@ -545,6 +663,7 @@ def get_months_to_fetch(latest_date: datetime) -> List[Tuple[int, int]]:
     
     # 如果本地沒有任何有效資料，從2025年9月開始（API可用的起始月份）
     if latest_date.year <= 2000:
+        # API從2025年9月23日開始有資料
         start_date = datetime(2025, 9, 1).replace(tzinfo=TAIPEI_TZ)
         log(f"本地無有效資料，從2025年9月開始抓取", "INFO")
     else:
@@ -699,11 +818,11 @@ def save_data(data: Dict) -> bool:
         # 儲存更新資訊
         update_info = {
             'last_updated': datetime.now(TAIPEI_TZ).isoformat(),
-            'data_version': '1.0',
+            'data_version': '2.0',
             'total_games': len(data),
             'total_records': sum(len(records) for records in data.values()),
             'games_available': list(data.keys()),
-            'note': '資料來源: 手動歷史資料 + 台灣彩券官方API'
+            'note': '資料來源: 台灣彩券官方ZIP檔案 + API'
         }
         
         with open('data/update-info.json', 'w', encoding='utf-8') as f:
@@ -747,6 +866,7 @@ def check_data_coverage(data: Dict) -> None:
     log("=" * 60, "INFO")
     
     today = datetime.now(TAIPEI_TZ)
+    current_year = today.year
     
     for game_name, draws in data.items():
         if not draws:
@@ -760,23 +880,22 @@ def check_data_coverage(data: Dict) -> None:
         log(f"  資料範圍: {draws[0]['date']} 到 {draws[-1]['date']}", "INFO")
         log(f"  總期數: {len(draws)}", "INFO")
         
-        # 檢查是否有9月23日前的資料
-        sep23 = datetime(2025, 9, 23)
-        if earliest_date < sep23:
-            manual_count = sum(1 for d in draws 
-                             if datetime.strptime(d['date'], '%Y-%m-%d') < sep23)
-            log(f"  手動資料(9/23前): {manual_count} 期", "SUCCESS")
+        # 檢查年份覆蓋
+        years = set()
+        for draw in draws:
+            year = datetime.strptime(draw['date'], '%Y-%m-%d').year
+            years.add(year)
         
-        # 檢查是否有9月23日後的資料
-        api_count = sum(1 for d in draws 
-                       if datetime.strptime(d['date'], '%Y-%m-%d') >= sep23)
-        if api_count > 0:
-            log(f"  API資料(9/23後): {api_count} 期", "SUCCESS")
+        if years:
+            sorted_years = sorted(years)
+            log(f"  涵蓋年份: {sorted_years}", "INFO")
         
         # 檢查是否有缺失
         expected_dates = []
         current = earliest_date
         while current <= latest_date:
+            # 只計算週二、四、六（大樂透開獎日）或其他遊戲的開獎日
+            # 這裡簡單檢查，實際應該根據遊戲規則
             expected_dates.append(current.strftime('%Y-%m-%d'))
             current += timedelta(days=1)
         
@@ -788,8 +907,6 @@ def check_data_coverage(data: Dict) -> None:
             if len(missing_dates) <= 5:
                 for date in missing_dates:
                     log(f"    - {date}", "WARNING")
-            else:
-                log(f"    前5筆缺失: {missing_dates[:5]}", "WARNING")
         else:
             log(f"  資料完整: 是", "SUCCESS")
 
@@ -797,8 +914,8 @@ def check_data_coverage(data: Dict) -> None:
 def main():
     """主執行流程"""
     print("=" * 70)
-    print("🎯 台灣彩券開獎資料自動更新系統 - 手動+API混合版")
-    print("📅 功能: 1. 手動匯入2025年1月-9月22日歷史資料")
+    print("🎯 台灣彩券開獎資料自動更新系統 - ZIP檔案自動解析版")
+    print("📅 功能: 1. 自動解析ZIP檔案（110年-114年歷史資料）")
     print("        2. 自動抓取9月23日以後API資料")
     print("        3. 持續增量更新未來開獎")
     print("=" * 70)
@@ -808,13 +925,13 @@ def main():
     try:
         # 檢查是否需要手動匯入
         if not os.path.exists('data/lottery-data.json'):
-            log("資料庫不存在，建議先進行手動匯入", "INFO")
-            choice = input("是否現在進行手動歷史資料匯入？(y/N): ").strip().lower()
+            log("資料庫不存在，建議先進行歷史資料匯入", "INFO")
+            choice = input("是否現在從ZIP檔案匯入歷史資料？(y/N): ").strip().lower()
             if choice == 'y':
-                if not manual_import_historical_data():
-                    log("手動匯入失敗或取消", "WARNING")
+                if not manual_import_from_zip():
+                    log("ZIP檔案匯入失敗或取消", "WARNING")
                 else:
-                    log("手動匯入完成，繼續執行增量更新", "SUCCESS")
+                    log("歷史資料匯入完成，繼續執行增量更新", "SUCCESS")
         
         # 載入現有資料庫
         existing_data = load_existing_data()
@@ -826,11 +943,15 @@ def main():
         all_new_data = {}
         
         for game_name in GAME_API_CONFIG.keys():
-            existing_draws = existing_data.get(game_name, [])
-            new_draws = crawl_game_incrementally(game_name, existing_draws)
-            
-            if new_draws:
-                all_new_data[game_name] = new_draws
+            # 只處理有API的遊戲
+            if GAME_API_CONFIG[game_name].get("api_path"):
+                existing_draws = existing_data.get(game_name, [])
+                new_draws = crawl_game_incrementally(game_name, existing_draws)
+                
+                if new_draws:
+                    all_new_data[game_name] = new_draws
+            else:
+                log(f"{game_name} 沒有API端點，跳過增量更新", "INFO")
         
         # 合併與儲存
         if all_new_data:
@@ -862,11 +983,16 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         if sys.argv[1] == "--import":
             # 執行手動匯入模式
-            manual_import_historical_data()
+            manual_import_from_zip()
+        elif sys.argv[1] == "--check":
+            # 檢查資料庫狀態
+            data = load_existing_data()
+            check_data_coverage(data)
         elif sys.argv[1] == "--help":
             print("使用說明:")
             print("  python lottery_crawler.py           # 正常執行（包含增量更新）")
-            print("  python lottery_crawler.py --import  # 僅執行手動歷史資料匯入")
+            print("  python lottery_crawler.py --import  # 僅執行ZIP檔案歷史資料匯入")
+            print("  python lottery_crawler.py --check   # 檢查資料庫狀態")
             print("  python lottery_crawler.py --help    # 顯示此說明")
             sys.exit(0)
     else:
