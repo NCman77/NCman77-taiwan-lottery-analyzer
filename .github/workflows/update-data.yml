@@ -1,66 +1,92 @@
-name: 自動更新台灣彩券開獎資料
-
+name: Update Lottery Data
 on:
   schedule:
-    # 每天台灣時間 22:15 執行（開獎後）
-    - cron: '15 14 * * *'
-  workflow_dispatch:  # 允許手動觸發
+    # 每天台灣時間 11:00 執行 (UTC+8 = 03:00 UTC)
+    - cron: '0 3 * * *'
+  workflow_dispatch:  # 手動觸發
   push:
-    branches:
-      - main
-
-# 設定權限：允許寫入倉庫內容
-permissions:
-  contents: write
+    branches: [ main, master ]
 
 jobs:
-  update-lottery-data:
+  update-data:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 需要寫入權限來提交更改
     
     steps:
-    - name: 🛠️ 檢出倉庫
+    - name: Checkout repository
       uses: actions/checkout@v4
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
-        fetch-depth: 0  # 獲取完整歷史
-        
-    - name: 🐍 設定 Python 環境
-      uses: actions/setup-python@v4
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
-        
-    - name: 📦 安裝 Python 依賴
+        python-version: '3.11'
+    
+    - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install requests pytz
-        
-    - name: 🚀 執行自動更新腳本
-      run: python scripts/update.py
-      
-    - name: 📊 檢查資料變更
+    
+    - name: Run update script
+      id: update
+      run: |
+        echo "開始更新開獎資料..."
+        cd scripts
+        python update.py
+        echo "更新完成！"
+    
+    - name: Check for changes
       id: check_changes
       run: |
+        echo "檢查檔案變更..."
         git add data/
-        if git diff --cached --quiet; then
-          echo "沒有新資料需要更新"
+        if git diff --staged --quiet; then
+          echo "沒有新資料"
           echo "has_changes=false" >> $GITHUB_OUTPUT
         else
-          echo "發現新資料，準備提交"
+          echo "檢測到新資料"
           echo "has_changes=true" >> $GITHUB_OUTPUT
         fi
-        
-    - name: ⚙️ 設定 Git 身分
+    
+    - name: Commit and push changes
       if: steps.check_changes.outputs.has_changes == 'true'
       run: |
-        git config --global user.name "GitHub Actions Bot"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        echo "提交變更到倉庫..."
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "GitHub Actions"
         
-    - name: 📤 提交並推送更新
-      if: steps.check_changes.outputs.has_changes == 'true'
+        # 取得更新摘要
+        UPDATE_INFO=$(cat data/update-info.json | jq -r '.last_updated' | cut -d'T' -f1)
+        git commit -m "🔄 更新開獎資料至 $UPDATE_INFO [$(date +'%Y-%m-%d %H:%M:%S')]"
+        
+        # 推送變更
+        git push origin HEAD:${{ github.ref_name }}
+        
+        echo "✅ 資料已成功更新並提交"
+    
+    - name: Upload data as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: lottery-data-update
+        path: data/
+        retention-days: 7
+    
+    - name: Create summary
+      if: always()
       run: |
-        git add data/
-        git commit -m "自動更新開獎資料 $(date +'%Y-%m-%d %H:%M')"
-        git push
-      env:
-        # 使用 GitHub 自動產生的 token
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        echo "## 開獎資料更新報告" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        if [[ "${{ steps.check_changes.outputs.has_changes }}" == "true" ]]; then
+          echo "✅ **成功更新資料庫**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "更新時間: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "資料檔案已自動提交到倉庫。" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "ℹ️ **無新資料需要更新**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "資料庫已經是最新狀態。" >> $GITHUB_STEP_SUMMARY
+        fi
