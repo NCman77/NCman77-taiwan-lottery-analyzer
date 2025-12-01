@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 台灣彩券開獎資料更新腳本 - API增量更新版本
-版本: 2.0
+版本: 2.1
 功能: 從台灣彩券官方API抓取最新開獎資料
 """
 
@@ -9,9 +9,9 @@ import requests
 import os
 import sys
 import time
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from scripts.common import (
+from common import (
     log, load_existing_data, merge_and_deduplicate, 
     save_data, check_data_coverage, GAME_API_CONFIG,
     TAIPEI_TZ
