@@ -134,25 +134,29 @@ def parse_draw_numbers(raw_data: Dict, game_config: Dict) -> Optional[Dict]:
         log(f"解析單筆開獎資料時發生錯誤: {e}", "ERROR")
         return None
 
-def get_months_to_fetch(latest_date: datetime, months_back: int = 3) -> List[Tuple[int, int]]:
+def get_months_to_fetch(latest_date: datetime, months_back: int = 12) -> List[Tuple[int, int]]:
     """
-    計算需要抓取的月份清單
-    :param latest_date: 本地最新資料的日期
-    :param months_back: 最多往回抓幾個月 (預設3個月)
-    :return: 西元年、月的元組列表 [(2025, 11), (2025, 12), ...]
+    修正版：計算需要抓取的月份清單
+    如果本地沒有資料，會抓取完整的歷史月份
     """
     today = datetime.now(TAIPEI_TZ)
     months_needed = []
     
-    # 如果沒有任何本地資料，從指定月數前開始
-    if latest_date.year == 1:  # datetime.min
-        start_date = today - timedelta(days=30 * months_back)
+    # 如果本地沒有任何資料，從指定月數前開始
+    if latest_date.year <= 2000:  # 判斷是否為初始狀態
+        # 假設從2025年1月開始（您可以調整這個日期）
+        start_date = datetime(2025, 1, 1).replace(tzinfo=TAIPEI_TZ)
+        log(f"初始狀態，從 {start_date.year}年{start_date.month}月 開始抓取", "INFO")
     else:
-        start_date = latest_date
+        # 從本地最新日期的「下一個月」開始
+        if latest_date.month == 12:
+            start_date = latest_date.replace(year=latest_date.year + 1, month=1, day=1)
+        else:
+            start_date = latest_date.replace(month=latest_date.month + 1, day=1)
     
-    # 從start_date的月份開始，到當月為止
-    current = start_date.replace(day=1)
-    end = today.replace(day=1)
+    # 從 start_date 的月份開始，到「上個月」為止
+    current = start_date
+    end = today.replace(day=1)  # 只抓到上個月，不抓當月
     
     while current <= end:
         months_needed.append((current.year, current.month))
@@ -164,66 +168,6 @@ def get_months_to_fetch(latest_date: datetime, months_back: int = 3) -> List[Tup
             current = current.replace(month=current.month + 1)
     
     return months_needed
-
-# ========== 核心爬蟲函數 ==========
-def fetch_game_month_data(game_name: str, year: int, month: int) -> List[Dict]:
-    """抓取指定遊戲、年份、月份的開獎資料"""
-    if game_name not in GAME_API_CONFIG:
-        log(f"遊戲 '{game_name}' 未配置API", "ERROR")
-        return []
-    
-    config = GAME_API_CONFIG[game_name]
-    api_url = f"{API_BASE_URL}{config['api_path']}"
-    
-    # API查詢參數 (根據您提供的網址格式)
-    params = {
-        'month': f"{year}-{month:02d}",
-        'pageNum': 1,
-        'pageSize': 50  # 單月期數不會超過50
-    }
-    
-    log(f"抓取 {game_name} {year}/{month:02d} 資料...", "INFO")
-    
-    # 發送API請求
-    response_data = safe_request(api_url, params)
-    if not response_data:
-        return []
-    
-    # 解析API回應結構 (根據真實資料格式)
-    try:
-        if response_data.get("rtCode") != 0:
-            log(f"API回傳錯誤: {response_data.get('rtMsg', '未知錯誤')}", "WARNING")
-            return []
-        
-        # 提取開獎列表 (不同遊戲的欄位名稱可能不同)
-        content = response_data.get("content", {})
-        draws_key = None
-        
-        # 尋找包含開獎資料的欄位
-        for key in content:
-            if isinstance(content[key], list):
-                draws_key = key
-                break
-        
-        if not draws_key:
-            log(f"找不到開獎資料列表欄位", "WARNING")
-            return []
-        
-        draw_list = content[draws_key]
-        
-        # 解析每一期開獎資料
-        parsed_draws = []
-        for raw_draw in draw_list:
-            parsed = parse_draw_numbers(raw_draw, config)
-            if parsed:
-                parsed_draws.append(parsed)
-        
-        log(f"{game_name} {year}/{month:02d} 成功解析 {len(parsed_draws)} 筆資料", "SUCCESS")
-        return parsed_draws
-        
-    except Exception as e:
-        log(f"解析API回應時發生錯誤: {e}", "ERROR")
-        return []
 
 def crawl_game_incrementally(game_name: str, existing_draws: List[Dict]) -> List[Dict]:
     """增量爬取指定遊戲的新資料"""
@@ -416,3 +360,4 @@ def main():
 if __name__ == "__main__":
     success = main()
     sys.exit(0 if success else 1)
+
