@@ -1,0 +1,1 @@
+# NCman77-taiwan-lottery-analyzer
