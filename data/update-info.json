@@ -1,6 +1,6 @@
 {
-  "last_updated": "2025-12-01T19:02:37.431285+08:00",
-  "data_version": "7.0",
+  "last_updated": "2025-12-01T19:04:09.681609+08:00",
+  "data_version": "2.0",
   "total_games": 3,
   "total_records": 52,
   "games_available": [
@@ -8,5 +8,5 @@
     "威力彩",
     "今彩539"
   ],
-  "note": "資料來源: 台灣彩券官方API (增量爬蟲)"
+  "note": "資料來源: 台灣彩券官方ZIP檔案 + API"
 }
