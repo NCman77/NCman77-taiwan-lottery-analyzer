@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 台灣彩券開獎資料系統 - 共用函數模組
-版本: 2.0
+版本: 2.1
 """
 
 import json
@@ -9,6 +9,7 @@ import os
 import csv
 import zipfile
 import re
+import shutil
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Set
 import pytz
@@ -60,7 +61,7 @@ def log(message: str, level: str = "INFO"):
 
 def load_existing_data() -> Dict:
     """載入現有的JSON資料庫"""
-    data_file = 'data/lottery-data.json'
+    data_file = '../data/lottery-data.json'
     
     if os.path.exists(data_file):
         try:
@@ -115,30 +116,32 @@ def merge_and_deduplicate(existing: Dict, new_data: Dict) -> Tuple[Dict, int]:
 def save_data(data: Dict) -> bool:
     """儲存資料到檔案系統"""
     try:
-        os.makedirs('data', exist_ok=True)
+        os.makedirs('../data', exist_ok=True)
         
         # 建立備份
-        backup_file = 'data/lottery-data-backup.json'
-        if os.path.exists('data/lottery-data.json'):
-            import shutil
-            shutil.copy2('data/lottery-data.json', backup_file)
-            log(f"建立備份: {backup_file}", "INFO")
+        backup_file = '../data/lottery-data-backup.json'
+        if os.path.exists('../data/lottery-data.json'):
+            try:
+                shutil.copy2('../data/lottery-data.json', backup_file)
+                log(f"建立備份: {backup_file}", "INFO")
+            except Exception as e:
+                log(f"建立備份失敗: {e}", "WARNING")
         
         # 儲存主要資料檔案
-        with open('data/lottery-data.json', 'w', encoding='utf-8') as f:
+        with open('../data/lottery-data.json', 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         
         # 儲存更新資訊
         update_info = {
             'last_updated': datetime.now(TAIPEI_TZ).isoformat(),
-            'data_version': '2.0',
+            'data_version': '2.1',
             'total_games': len(data),
             'total_records': sum(len(records) for records in data.values()),
             'games_available': list(data.keys()),
             'note': '資料來源: 台灣彩券官方ZIP檔案 + API'
         }
         
-        with open('data/update-info.json', 'w', encoding='utf-8') as f:
+        with open('../data/update-info.json', 'w', encoding='utf-8') as f:
             json.dump(update_info, f, ensure_ascii=False, indent=2)
         
         # 顯示摘要
