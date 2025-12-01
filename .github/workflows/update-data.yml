@@ -2,14 +2,14 @@ name: 自動更新台灣彩券開獎資料
 
 on:
   schedule:
-    # 每天台灣時間 22:30 執行（開獎後）
-    - cron: '30 14 * * *'
+    # 每天台灣時間 22:15 執行（開獎後）
+    - cron: '15 14 * * *'
   workflow_dispatch:  # 允許手動觸發
   push:
     branches:
       - main
 
-# 設定權限：允許寫入內容
+# 設定權限：允許寫入倉庫內容
 permissions:
   contents: write
 
@@ -18,26 +18,26 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: 檢出倉庫（使用有寫入權限的token）
+    - name: 🛠️ 檢出倉庫
       uses: actions/checkout@v4
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
-        fetch-depth: 0  # 獲取所有歷史記錄
+        fetch-depth: 0  # 獲取完整歷史
         
-    - name: 設定 Python
+    - name: 🐍 設定 Python 環境
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
         
-    - name: 安裝 Python 依賴
+    - name: 📦 安裝 Python 依賴
       run: |
         python -m pip install --upgrade pip
-        pip install requests beautifulsoup4 pytz pandas
+        pip install requests pytz
         
-    - name: 執行自動更新腳本
+    - name: 🚀 執行自動更新腳本
       run: python scripts/update.py
       
-    - name: 檢查是否有新資料
+    - name: 📊 檢查資料變更
       id: check_changes
       run: |
         git add data/
@@ -49,17 +49,18 @@ jobs:
           echo "has_changes=true" >> $GITHUB_OUTPUT
         fi
         
-    - name: 設定 Git 使用者
+    - name: ⚙️ 設定 Git 身分
       if: steps.check_changes.outputs.has_changes == 'true'
       run: |
         git config --global user.name "GitHub Actions Bot"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         
-    - name: 提交並推送更新
+    - name: 📤 提交並推送更新
       if: steps.check_changes.outputs.has_changes == 'true'
       run: |
         git add data/
         git commit -m "自動更新開獎資料 $(date +'%Y-%m-%d %H:%M')"
-        git push origin HEAD:main
+        git push
       env:
+        # 使用 GitHub 自動產生的 token
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
